@@ -16,11 +16,11 @@ START: Please plot in the parameters accordingly
 options Metaport=8561;
 options Metauser="sasdemo";
 options Metapass="Orion123";
-options METASERVER="sas-aap.demo.sas.com";
+options METASERVER="localhost";
 options Metarepository="Foundation";
 options metaprotocol=bridge;
 
-libname stordir "C:\THC\";
+libname stordir "C:\\temp";
 /************************************************
 END: Please plot in the parameters accordingly
 *************************************************
@@ -443,80 +443,21 @@ run;
 	quit;
 %mend mapFlow;
 
-data stordir.LogJobId;
-	infile datalines delimiter=',';
-	length id $256;
-	input id;
-	datalines;
-A5ED3SKF.BW000005
-;
-run;
-
-/************************************************
-*************************************************
-START: Please select appropriate macros to run
-*************************************************
-*************************************************/
-
-/*************************************************
-Various examples to run:
-%macro getTableDet(store, objType, key, id, structure, featureMap, endPoint);
-%getMetaObj(Job, JobList, id=., mode=CREATE);
-%getMetaObj(Job, JobList, id=A59RYTQX.BY0000VQ, mode=CREATE);
-%getMetaObj(TransformationStep, StepList, id=., mode=CREATE);
-*************************************************/
-
-/*************************************************
-To feed selected jobs:
-*************************************************/
-/*%getMetaObjs(LogJobId, JobList, Job);*/
-
-/*************************************************
-To get all job
-%getMetaObj(Job, JobList, id=., mode=CREATE);
-*************************************************/
-%getMetaObj(Job, JobList, id=., mode=CREATE);
-%getMetaLinks(JobList, JobStepList, CustomAssociations, AssociatedObjects);
-%getMetaObjs(JobStepList, StepList, TransformationStep);
-%getMetaLinks(StepList, StepCTList, Transformations, ClassifierTargets);
-%getMetaLinks(StepList, StepCSList, Transformations, ClassifierSources);
-/*%getTables(StepCSList, MappingS, objtyp, SourceFeatureMaps, TransformationTargets);*/
-/*%getTables(StepCTList, MappingT, objtyp, TargetFeatureMaps, TransformationTargets);*/
-%getTables(StepCSList, MappingS, objtyp, SourceFeatureMaps, TargetTransformations);
-%getTables(StepCTList, MappingT, objtyp, TargetFeatureMaps, TargetTransformations);
-%mapFlow(JobList, JobStepList, StepCSList, StepCTList, MappingT, MappingS);
-
-/************************************************
-*************************************************
-END: Please select appropriate macros to run
-*************************************************
-*************************************************/
-
-/***************************************************************************************
-** Exmple of troubleshooting the code
-***************************************************************************************/
-
-/*OMSOBJ:Column\A5ED3SKF.BO0003LM*/
-/*OMSOBJ:FeatureMap\A5ED3SKF.C500002X*/
-/*OMSOBJ:TextStore\A5ED3SKF.AG00022M*/
-/*OMSOBJ:Column\A5ED3SKF.BO0001G5*/
-/*FeatureSources	OMSOBJ:Column\A5ED3SKF.BO0001G5*/
-/*FeatureTargets	OMSOBJ:Column\A5ED3SKF.BO0003LM*/
-/*SourceCode	OMSOBJ:TextStore\A5ED3SKF.AG00022M*/
-/*SubstitutionVariables	OMSOBJ:Variable\A5ED3SKF.C7000001*/
-
 /******************************************************
 * Get the Attributes
 ******************************************************/
 %macro uriGetNATR(store, URI);
 	data &store.;
 		length attr metanvalue $256;
+		length uri $256;
+		uri = &URI.;
 		i=0;
 		do until (rc<0);
 			i+1;
 			rc=METADATA_GETNATR(&URI., i, attr, metanvalue);
 			if rc>0 then output;
 		end;
+		drop i rc;
 	run;
 %mend uriGetNATR;
 
@@ -552,8 +493,261 @@ END: Please select appropriate macros to run
 			rc2=METADATA_GETNASL(next_uri, i, metaasn2);
 			if rc2>0 then output;
 		end;
+		drop i rc;
 	run;
 %mend uriGetNASN;
+
+%macro uriGetN(level, num, objid, natr, objLinkPairs, maxDepth, first_level_uri, parent_prefix);
+	%global uniq_counter;
+	%local prefix record_count next_level i match_count match_item;
+
+/*	%if %symexist(uniq_counter) = 0 %then %let uniq_counter = 0;*/
+/*	%let uniq_counter = %eval(&uniq_counter + 1);*/
+/*	%let prefix = U&uniq_counter.;*/
+    
+    %if &level = 1 %then %let prefix=L&level.R&num.;
+    %else %let prefix=&parent_prefix.L&level.R&num.;
+    
+    %put NOTE: Processing &prefix. with objid=&objid.;
+
+    %let pairCount = %sysfunc(countw(&objLinkPairs., %str(->)));
+    %local obj link;
+
+    %let objLinkPair = %scan(&objLinkPairs., &level., %str(->));
+    %let obj = %scan(&objLinkPair., 1, %str(:));
+    %let link = %scan(&objLinkPair., 2, %str(:));
+
+    %uriGetNATR(&prefix.NATR, "&objid.");
+    %uriGetNASL(&prefix.NSAL, "&objid.");
+
+    /* Filter NSAL results based on the link */
+    data &prefix.NSAL;
+        set &prefix.NSAL;
+        if upcase(metaasn) = upcase("&link.");
+    run;
+
+    %uriGetNASN(&prefix.NSAN, "&objid.", &prefix.NSAL);
+
+    /* Check if there are records in the &prefix.NSAN table */
+    proc sql noprint;
+        select count(distinct next_uri) into :record_count
+        from &prefix.NSAN;
+    quit;
+
+    %put NOTE: &prefix. has &record_count. distinct records in NSAN;
+
+    /* Populate LibNATR if level is 1 and NATR is not empty */
+    proc sql noprint;
+        select count(*) into :natr_count from &prefix.NATR;
+    quit;
+
+    %if &natr_count. > 0 %then %do;
+        data &prefix.NATR;
+            set &prefix.NATR;
+            first_level_uri = "&first_level_uri.";
+			depth = &level.;
+        run;
+
+        proc append base=&natr. data=&prefix.NATR force;
+        run;
+    %end;
+
+/*    %if &level = 1 %then %do;*/
+/*        proc sql noprint;*/
+/*            select count(*) into :natr_count from &prefix.NATR;*/
+/*        quit;*/
+/**/
+/*        %if &natr_count. > 0 %then %do;*/
+/*            data &prefix.NATR;*/
+/*                set &prefix.NATR;*/
+/*                first_level_uri = "&first_level_uri.";*/
+/*				depth = &level.;*/
+/*            run;*/
+/**/
+/*            proc append base=&natr. data=&prefix.NATR force;*/
+/*            run;*/
+/*        %end;*/
+/*    %end;*/
+    /* Check for objid case-insensitive matching to matchList and populate LibNATR */
+/*    %else %do;*/
+/*        %let match_count = 0;*/
+/*        %do i = 1 %to %sysfunc(countw(&matchList, %str( )));*/
+/*            %let match_item = %scan(&matchList, &i, %str( ));*/
+/*            %if %index(%upcase(&objid), %upcase(&match_item)) > 0 %then %do;*/
+/*                %let match_count = 1;*/
+/*                %goto match_found;*/
+/*            %end;*/
+/*        %end;*/
+/**/
+/*		%match_found:*/
+/*        %if &match_count > 0 %then %do;*/
+/*            data &prefix.NATR;*/
+/*                set &prefix.NATR;*/
+/*                first_level_uri = "&first_level_uri";*/
+/*				depth = &level.;*/
+/*            run;*/
+/**/
+/*            proc append base=&natr. data=&prefix.NATR force;*/
+/*            run;*/
+/*        %end;*/
+/*    %end;*/
+
+    %if &record_count. > 0 and &level. <= &maxDepth. %then %do;
+        proc sql noprint;
+            select distinct next_uri into :next_objid_1-:next_objid_%trim(&record_count.)
+            from &prefix.NSAN;
+        quit;
+
+        %let next_level = %eval(&level + 1);
+        %do i = 1 %to &record_count;
+            %put NOTE: Calling uriGetN with next_level=&next_level, i=&i, next_objid=&&next_objid_&i..;
+            %uriGetN(&next_level., &i., &&next_objid_&i.., &natr., &objLinkPairs., &maxDepth., &first_level_uri., &prefix.);
+        %end;
+    %end;
+    %else %do;
+        %put NOTE: Exiting loop at level &level with prefix &prefix;
+    %end;
+%mend uriGetN;
+
+%macro iterObj(objLinkPairs, objlist, natr, maxDepth);
+	%let natrStore= stordir.&natr;
+	data &natrStore.;
+	    length attr metanvalue uri first_level_uri $500 depth 8;
+	    stop;
+	run;
+
+    %let pairCount = %sysfunc(countw(&objLinkPairs., %str(->)));
+    %local obj link;
+	%let level = 1;
+
+    %let objLinkPair = %scan(&objLinkPairs., &level., %str(->));
+    %let obj = %scan(&objLinkPair., 1, %str(:));
+    %let link = %scan(&objLinkPair., 2, %str(:));
+    
+	/* Need first pair to get the proper URI */
+	%getMetaObj(&obj., &objlist., id=., mode=CREATE);
+
+	proc sql;
+		select count(1) into :list_cnt
+		from stordir.&objlist.;
+	quit;
+
+	proc sql;
+		select catx('', 'OMSOBJ:', "&obj.", '\', id)
+			into :objid_1-:objid_%trim(&list_cnt.)
+		from stordir.&objlist.;
+	quit;
+
+	%local num;
+/*	%let next_level = %eval(&level. + 1);*/
+	%do num = 1 %to &list_cnt.;
+		%uriGetN(&level., %trim(&num), &&objid_&num, &natrStore, &objLinkPairs, &maxDepth., &&objid_&num., );
+	%end;
+
+%mend iterObj;
+
+/*
+data stordir.LogJobId;
+	infile datalines delimiter=',';
+	length id $256;
+	input id;
+	datalines;
+A5M7BT95.BZ00006X
+;
+run;
+*/
+
+/************************************************
+*************************************************
+START: Please select appropriate macros to run
+*************************************************
+*************************************************/
+
+/*************************************************
+Various examples to run:
+%macro getTableDet(store, objType, key, id, structure, featureMap, endPoint);
+%getMetaObj(Job, JobList, id=., mode=CREATE);
+%getMetaObj(Job, JobList, id=A59RYTQX.BY0000VQ, mode=CREATE);
+%getMetaObj(TransformationStep, StepList, id=., mode=CREATE);
+*************************************************/
+
+/*************************************************
+To feed selected jobs:
+*************************************************/
+/*%getMetaObjs(LogJobId, JobList, Job);*/
+
+/*************************************************
+To get all job
+%getMetaObj(Job, JobList, id=., mode=CREATE);
+*************************************************/
+%macro getAllJob();
+	%getMetaObj(Job, JobList, id=., mode=CREATE);
+	%getMetaLinks(JobList, JobStepList, CustomAssociations, AssociatedObjects);
+	%getMetaObjs(JobStepList, StepList, TransformationStep);
+	%getMetaLinks(StepList, StepCTList, Transformations, ClassifierTargets);
+	%getMetaLinks(StepList, StepCSList, Transformations, ClassifierSources);
+	/*%getTables(StepCSList, MappingS, objtyp, SourceFeatureMaps, TransformationTargets);*/
+	/*%getTables(StepCTList, MappingT, objtyp, TargetFeatureMaps, TransformationTargets);*/
+	%getTables(StepCSList, MappingS, objtyp, SourceFeatureMaps, TargetTransformations);
+	%getTables(StepCTList, MappingT, objtyp, TargetFeatureMaps, TargetTransformations);
+	%mapFlow(JobList, JobStepList, StepCSList, StepCTList, MappingT, MappingS);
+%mend getAllJob;
+
+/*************************************************
+To get all job
+%getMetaObj(Job, JobList, id=., mode=CREATE);
+*************************************************/
+%macro getAllLib();
+	%getMetaObj(SASLibrary, LibList, id=., mode=CREATE);
+/*	%getMetaLinks(LibList, LibStepList, CustomAssociations, AssociatedObjects);*/
+%mend getAllLib;
+
+%getAllLib();
+%let maxDepth=3;
+%iterObj(SASLibrary:LibraryConnection->SASClientConnection:Properties->Property, LibList, LibNATR, &maxDepth.);
+
+proc sql;
+	select attr, metanvalue, uri, first_level_uri, depth from stordir.LIBNATR
+	where attr in ('Libref','Engine','PropertyName','Delimiter','DefaultValue')
+	group by first_level_uri, depth;
+quit;
+
+/*%let num=1;*/
+/*%uriGetNATR(tmp&num.NATR, "OMSOBJ:ServerContext\A5ED3SKF.AT000002");*/
+/*%uriGetNASL(tmp&num.NSAL, "OOMSOBJ:ServerContext\A5ED3SKF.AT000002");*/
+/*%uriGetNASN(tmp&num.NSAN, "OMSOBJ:ServerContext\A5ED3SKF.AT000002", tmp&num.NSAL);*/
+/**/
+/*%let num=2;*/
+/*/*TargetFeatureMaps	OMSOBJ:FeatureMap\A5ED3SKF.C500002X*/*/
+/*%uriGetNATR(tmp&num.NATR, "OMSOBJ:SASClientConnection\A5ED3SKF.B1000009");*/
+/*%uriGetNASL(tmp&num.NSAL, "OMSOBJ:SASClientConnection\A5ED3SKF.B1000009");*/
+/*%uriGetNASN(tmp&num.NSAN, "OMSOBJ:SASClientConnection\A5ED3SKF.B1000009", tmp&num.NSAL);*/
+/**/
+/*%let num=3;*/
+/*/*FeatureSources	OMSOBJ:Column\A5ED3SKF.BO0001G5*/*/
+/*%uriGetNATR(tmp&num.NATR, "OMSOBJ:Property\A5ED3SKF.AC0002YZ");*/
+/*%uriGetNASL(tmp&num.NSAL, "OMSOBJ:Property\A5ED3SKF.AC0002YZ");*/
+/*%uriGetNASN(tmp&num.NSAN, "OMSOBJ:Property\A5ED3SKF.AC0002YZ", tmp&num.NSAL);*/
+
+
+/************************************************
+*************************************************
+END: Please select appropriate macros to run
+*************************************************
+*************************************************/
+
+/***************************************************************************************
+** Exmple of troubleshooting the code
+***************************************************************************************/
+
+/*OMSOBJ:Column\A5ED3SKF.BO0003LM*/
+/*OMSOBJ:FeatureMap\A5ED3SKF.C500002X*/
+/*OMSOBJ:TextStore\A5ED3SKF.AG00022M*/
+/*OMSOBJ:Column\A5ED3SKF.BO0001G5*/
+/*FeatureSources	OMSOBJ:Column\A5ED3SKF.BO0001G5*/
+/*FeatureTargets	OMSOBJ:Column\A5ED3SKF.BO0003LM*/
+/*SourceCode	OMSOBJ:TextStore\A5ED3SKF.AG00022M*/
+/*SubstitutionVariables	OMSOBJ:Variable\A5ED3SKF.C7000001*/
 
 
 /*%let num=1;*/
